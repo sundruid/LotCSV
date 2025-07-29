@@ -1,4 +1,5 @@
 import os
+import re
 import yaml
 import requests
 import json
@@ -6,6 +7,39 @@ from bs4 import BeautifulSoup
 import sys
 import random
 import urllib.parse
+
+def check_connectivity() -> bool:
+    """
+    Checks basic internet connectivity by trying to reach a reliable host.
+    Returns True if connectivity is available, False otherwise.
+    """
+    try:
+        response = requests.get("https://httpbin.org/get", timeout=5)
+        return response.status_code == 200
+    except:
+        return False
+
+def safe_request(url: str, timeout: int = 10) -> str | None:
+    """
+    Makes a safe HTTP request with proper error handling and timeout.
+    Returns the response text on success, None on failure.
+    """
+    try:
+        response = requests.get(url, timeout=timeout)
+        response.raise_for_status()  # Raise an exception for bad status codes
+        return response.text
+    except requests.exceptions.ConnectionError as e:
+        print(f" \033[1;90m[\033[1;31mERROR\033[1;90m]\033[0m Connection error for {url}: {e}")
+        return None
+    except requests.exceptions.Timeout as e:
+        print(f" \033[1;90m[\033[1;31mERROR\033[1;90m]\033[0m Timeout error for {url}: {e}")
+        return None
+    except requests.exceptions.HTTPError as e:
+        print(f" \033[1;90m[\033[1;31mERROR\033[1;90m]\033[0m HTTP error for {url}: {e}")
+        return None
+    except requests.exceptions.RequestException as e:
+        print(f" \033[1;90m[\033[1;31mERROR\033[1;90m]\033[0m Request error for {url}: {e}")
+        return None
 
 def GetRepository(url: str) -> None:
     directory = url.split("/")[4]
@@ -31,67 +65,92 @@ def FindFiles(path: str, extension: str, exclude: list[str] = []) -> list[str]:
     return found_files
 
 def ReadFiles(files: list[str]) -> tuple[list[str], list[dict]]:
-    """
-    Reads files from FindFiles.
-    """
     values = []
     keys = []
+
     def recursive_parse(data: dict | list | str, collected_data: dict, parent_key: str = "") -> None:
         if isinstance(data, dict):
             for key, val in data.items():
                 new_key = f"{parent_key}_{key}" if parent_key else key
-                if new_key.strip() not in keys: keys.append(new_key.strip())
+                if new_key.strip() not in keys:
+                    keys.append(new_key.strip())
                 recursive_parse(val, collected_data, new_key.strip())
         elif isinstance(data, list):
-            for item in data: recursive_parse(item, collected_data, parent_key)
+            for item in data:
+                recursive_parse(item, collected_data, parent_key)
         else:
             if "{'" not in str(data) and "'}" not in str(data):
                 if parent_key in collected_data:
-                    if isinstance(collected_data[parent_key], list): collected_data[parent_key].append(data)
-                    else: collected_data[parent_key] = [collected_data[parent_key], data]
-                else: collected_data[parent_key] = data
+                    if isinstance(collected_data[parent_key], list):
+                        collected_data[parent_key].append(data)
+                    else:
+                        collected_data[parent_key] = [collected_data[parent_key], data]
+                else:
+                    collected_data[parent_key] = data
+
     for file in files:
         print(f" \033[1;90m[\033[1;36m~\033[1;90m] \033[0mReading: {file}                                  ", end="\r")
         with open(file, "r", errors="ignore") as f:
             try:
-                contents = yaml.safe_load(f.read())
-                collected_data = {}
-                recursive_parse(contents, collected_data)
-                values.append(collected_data)
+                documents = list(yaml.safe_load_all(f.read()))
+                for doc in documents:
+                    if doc is None:
+                        continue
+                    collected_data = {}
+                    recursive_parse(doc, collected_data)
+                    values.append(collected_data)
             except yaml.YAMLError as e:
                 print(f"Error parsing YAML file {file}: {e}")
+
     return keys, values
 
 def ReadMDFiles(files: list[str]) -> tuple[list[str], list[dict]]:
     values = []
     keys = []
+
     def recursive_parse(data: dict | list | str, collected_data: dict, parent_key: str = "") -> None:
         if isinstance(data, dict):
             for key, val in data.items():
                 new_key = f"{parent_key}_{key}" if parent_key else key
-                if new_key not in keys: keys.append(new_key)
+                if new_key not in keys:
+                    keys.append(new_key)
                 recursive_parse(val, collected_data, new_key)
         elif isinstance(data, list):
-            for item in data: recursive_parse(item, collected_data, parent_key)
+            for item in data:
+                recursive_parse(item, collected_data, parent_key)
         else:
             if "{'" not in str(data) and "'}" not in str(data):
                 if parent_key in collected_data:
-                    if isinstance(collected_data[parent_key], list): collected_data[parent_key].append(data)
-                    else: collected_data[parent_key] = [collected_data[parent_key], data]
-                else: collected_data[parent_key] = data
+                    if isinstance(collected_data[parent_key], list):
+                        collected_data[parent_key].append(data)
+                    else:
+                        collected_data[parent_key] = [collected_data[parent_key], data]
+                else:
+                    collected_data[parent_key] = data
+
     for file in files:
         print(f" \033[1;90m[\033[1;36m~\033[1;90m] \033[0mReading: {file}                                  ", end="\r")
         with open(file, "r", errors="ignore") as f:
             content_raw = f.read().splitlines()
-            content_raw.pop(len(content_raw)-1)
-            content = "\n".join([str(i) for i in content_raw])
+            if content_raw and not content_raw[-1].strip():
+                content_raw.pop()
+            content = "\n".join(content_raw)
+
+            # Fix invalid YAML alias-like entries
+            content = re.sub(r':\s+\*([^\s]+)', r': "\1"', content)
+
             try:
-                contents = yaml.safe_load(content)
-                collected_data = {}
-                recursive_parse(contents, collected_data)
-                values.append(collected_data)
+                documents = list(yaml.safe_load_all(content))
+                for doc in documents:
+                    if doc is None:
+                        continue
+                    collected_data = {}
+                    recursive_parse(doc, collected_data)
+                    values.append(collected_data)
             except yaml.YAMLError as e:
                 print(f"Error parsing YAML file {file}: {e}")
+
+
     return keys, values
 
 def WriteExportCsv(output: str, values: list[dict], keys: list[str]) -> bool:
@@ -231,7 +290,11 @@ def GetLOLBAS(output: str) -> bool:
 
 def GetLOLDrivers(output: str) -> bool:
     print(" \033[1;90m[\033[1;96m~\033[1;90m]\033[0m Starting LOLDrivers")
-    content = requests.get("https://www.loldrivers.io/api/drivers.csv").text
+    content = safe_request("https://www.loldrivers.io/api/drivers.csv")
+    if content is None:
+        print(f" \033[1;90m[\033[1;31mFAILED\033[1;90m]\033[0m Failed to fetch LOLDrivers data")
+        return False
+    
     with open(output,"w",errors='ignore') as f:
         for j,i in enumerate(content.splitlines()):
             f.write( i + ',"is_legit"'+"\n") if j == 0 else f.write( i + ',"false"'+"\n")
@@ -249,7 +312,10 @@ def GetHijackLibs(output: str) -> bool:
 
 def GetBootloaders(output: str) -> bool:
     print(" \033[1;90m[\033[1;96m~\033[1;90m]\033[0m Starting Bootloaders")
-    content = requests.get("https://www.bootloaders.io/api/bootloaders.csv").text
+    content = safe_request("https://www.bootloaders.io/api/bootloaders.csv")
+    if content is None:
+        print(f" \033[1;90m[\033[1;31mFAILED\033[1;90m]\033[0m Failed to fetch Bootloaders data")
+        return False
     return StringifyExistingCsv(content,output)
 
 def GetLOFLCAB(output: str) -> bool:
@@ -262,7 +328,10 @@ def GetLOFLCAB(output: str) -> bool:
 
 def GetLOLAD(output: str) -> bool:
     print(" \033[1;90m[\033[1;96m~\033[1;90m]\033[0m Starting LOLAD")
-    content = requests.get("https://lolad-project.github.io/").text
+    content = safe_request("https://lolad-project.github.io/")
+    if content is None:
+        print(f" \033[1;90m[\033[1;31mFAILED\033[1;90m]\033[0m Failed to fetch LOLAD data")
+        return False
 
     soup = BeautifulSoup(content,"html.parser")
     keys = []
@@ -284,7 +353,10 @@ def GetLOLAD(output: str) -> bool:
 
 def GetLOLRMM(output: str) -> bool:
     print(" \033[1;90m[\033[1;96m~\033[1;90m]\033[0m Starting LOLRMM")
-    content = requests.get("https://lolrmm.io/api/rmm_tools.csv").text
+    content = safe_request("https://lolrmm.io/api/rmm_tools.csv")
+    if content is None:
+        print(f" \033[1;90m[\033[1;31mFAILED\033[1;90m]\033[0m Failed to fetch LOLRMM data")
+        return False
     return StringifyExistingCsv(content,output)
 
 def GetLOTTunnels(output:str) -> bool:
@@ -311,29 +383,29 @@ def GetLOTTunnels(output:str) -> bool:
         print(f"\n \033[1;90m[\033[1;32m+\033[1;90m]\033[0m Output file\033[1;90m:\033[0m \033[1;93m{output}\033[0m")
         extracted = []
         for i in values:
-            if isinstance(i["Detection_Domain"], list):
-                for k in i["Detection_Domain"]:
-                    data = {}
-                    data["Name"] = i["Name"]
-                    data["Domain"] = k
-                    extracted.append(data)
-            else:
-                data = {}
-                data["Name"] = i["Name"]
-                data["Domain"] = i["Detection_Domain"]
-                extracted.append(data)
-        with open(output.split(".csv")[0]+"_domain.csv", "w", encoding="utf-8", errors="ignore") as f:
-            f.write('"Name","Domain","is_legit"\n')
-            for i,value in enumerate(extracted):
-                line_items = []
-                for key in ["Name","Domain"]:
-                    val = value.get(key, "")
-                    sanitized = sanitize(val)
-                    line_items.append(sanitized)
-                line = f'"' + '","'.join(line_items) + '","false"' + '\n'
-                f.write(line)
-        print(f"\n \033[1;90m[\033[1;32m+\033[1;90m]\033[0m Output file\033[1;90m:\033[0m \033[1;93m{output.split('.csv')[0]}_domain.csv\033[0m")
-        return os.path.exists(output) and os.path.exists(output.split(".csv")[0]+"_domain.csv")
+            if "Detection_Domain" not in i:
+                continue  # skip records that lack the key
+
+            domains = i["Detection_Domain"]
+            name = i.get("Name", "")
+
+            if isinstance(domains, list):
+                for k in domains:
+                    extracted.append({"Name": name, "Domain": k})
+        else:
+            extracted.append({"Name": name, "Domain": domains})
+            with open(output.split(".csv")[0]+"_domain.csv", "w", encoding="utf-8", errors="ignore") as f:
+                f.write('"Name","Domain","is_legit"\n')
+                for i,value in enumerate(extracted):
+                    line_items = []
+                    for key in ["Name","Domain"]:
+                        val = value.get(key, "")
+                        sanitized = sanitize(val)
+                        line_items.append(sanitized)
+                    line = f'"' + '","'.join(line_items) + '","false"' + '\n'
+                    f.write(line)
+            print(f"\n \033[1;90m[\033[1;32m+\033[1;90m]\033[0m Output file\033[1;90m:\033[0m \033[1;93m{output.split('.csv')[0]}_domain.csv\033[0m")
+            return os.path.exists(output) and os.path.exists(output.split(".csv")[0]+"_domain.csv")
 
 
     print(" \033[1;90m[\033[1;96m~\033[1;90m]\033[0m Starting LOTTunels")
@@ -380,7 +452,7 @@ def GetLOLCerts(output: list[str]) -> bool:
     all_results = []
 
     for i in output:
-        yml_files = FindFiles(f"lolcerts/{i.split("/")[1].split("_")[1][:-4]}/",".yml")
+        yml_files = FindFiles(f"lolcerts/{i.split('/')[1].split('_')[1][:-4]}/", ".yml")
         keys, values = ReadFiles(yml_files)
         all_results.append(WriteExportCsv(i,values,keys))
 
@@ -388,7 +460,11 @@ def GetLOLCerts(output: list[str]) -> bool:
 
 def GetLotsProject(output: str, additional_info: bool = False) -> bool:
     print(" \033[1;90m[\033[1;96m~\033[1;90m]\033[0m Starting Lots-Project") if not additional_info else print(" \033[1;90m[\033[1;96m~\033[1;90m]\033[0m Starting Lots-Project (Additional)")
-    content = requests.get("https://lots-project.com/").text
+    content = safe_request("https://lots-project.com/")
+    if content is None:
+        print(f" \033[1;90m[\033[1;31mFAILED\033[1;90m]\033[0m Failed to fetch Lots-Project data")
+        return False
+    
     soup = BeautifulSoup(content,"html.parser")
     values = []
 
@@ -398,7 +474,11 @@ def GetLotsProject(output: str, additional_info: bool = False) -> bool:
         link = "https://lots-project.com"+row.find_all("a")[0]["href"]
         if additional_info:
             keys = ["Website","Tags","Service Provider","Info_Phishing","Info_C&C","Info_Exfiltration","Info_Download","Info_Sample"]
-            soup1 = BeautifulSoup(requests.get(link).text,"html.parser")
+            link_content = safe_request(link)
+            if link_content is None:
+                print(f" \033[1;90m[\033[1;31mWARNING\033[1;90m]\033[0m Failed to fetch additional info for {cols[0].text.strip()}")
+                continue
+            soup1 = BeautifulSoup(link_content,"html.parser")
             divs = soup1.find_all("div", class_="detail-container")
             additonal = {}
             for i in divs:
@@ -426,11 +506,11 @@ def GetLotsProject(output: str, additional_info: bool = False) -> bool:
                     keys[0]: cols[0].text.strip(),
                     keys[1]: tags,
                     keys[2]: cols[2].text.strip(),
-                    keys[3]: additonal["phishing"],
-                    keys[4]: additonal["c2"],
-                    keys[5]: additonal["exfil"],
-                    keys[6]: additonal["download"],
-                    keys[7]: additonal["sample"]
+                    keys[3]: additonal.get("phishing", ""),
+                    keys[4]: additonal.get("c2", ""),
+                    keys[5]: additonal.get("exfil", ""),
+                    keys[6]: additonal.get("download", ""),
+                    keys[7]: additonal.get("sample", "")
                 }
                 values.append(command_data)
         else:
@@ -447,7 +527,11 @@ def GetLotsProject(output: str, additional_info: bool = False) -> bool:
 
 def GetLotWebhooks(output: str) -> bool:
     print(" \033[1;90m[\033[1;96m~\033[1;90m]\033[0m Starting LOTWebhooks")
-    content = requests.get("https://lotwebhooks.github.io").text
+    content = safe_request("https://lotwebhooks.github.io")
+    if content is None:
+        print(f" \033[1;90m[\033[1;31mFAILED\033[1;90m]\033[0m Failed to fetch LOTWebhooks data")
+        return False
+    
     soup = BeautifulSoup(content,"html.parser")
     values = []
     keys = ["Webhook Name", "URL", "Type", "Reference"]
@@ -559,6 +643,15 @@ $$$$$$$$\\$$$$$$  | \$$$$  |\$$$$$$  |\$$$$$$  |   \$  /
 
 if __name__ == "__main__":
     HandleSysArgs()
+
+    # Check connectivity before starting
+    print(" \033[1;90m[\033[1;96m~\033[1;90m]\033[0m Checking network connectivity...")
+    if not check_connectivity():
+        print(" \033[1;90m[\033[1;31mWARNING\033[1;90m]\033[0m Network connectivity check failed. Some sources may not work properly.")
+        print(" \033[1;90m[\033[1;33mINFO\033[1;90m]\033[0m Continuing anyway - individual requests will handle their own errors gracefully.")
+    else:
+        print(" \033[1;90m[\033[1;32m+\033[1;90m]\033[0m Network connectivity confirmed.")
+    print()
 
     sources = {
         "bootloaders": lambda: GetBootloaders("export/bootloaders.csv"),
